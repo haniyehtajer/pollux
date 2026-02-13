@@ -1,10 +1,12 @@
+import warnings
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import SVI, Trace_ELBO
@@ -18,7 +20,11 @@ from ..typing import (
     PackedParamsT,
     UnpackedParamsT,
 )
+from .iterative import optimize_iterative
 from .transforms import AbstractSingleTransform, NoOpTransform, TransformSequence
+
+if TYPE_CHECKING:
+    from .iterative import IterativeOptimizationResult, ParameterBlock
 
 
 class LuxOutput(eqx.Module):
@@ -100,21 +106,42 @@ class LuxOutput(eqx.Module):
         return packed
 
 
-class LuxModel(eqx.Module):
+class Lux(eqx.Module):
     """A latent variable model with multiple outputs.
 
-    A Pollux model is a generative, latent variable model for output data. This is a
-    general framework for constructing multi-output or multi-task models in which the
-    output data is generated as a transformation away from some embedded vector
-    representation of each object. While this class and model structure can be used in a
-    broad range of applications, this package and implementation was written with
-    applications to stellar spectroscopic data in mind.
+    Lux is a generative, latent variable model for output data. This is a general
+    framework for constructing multi-output or multi-task models in which the output
+    data is generated as a transformation away from some embedded vector representation
+    of each object. While this class and model structure can be used in a broad range of
+    applications, this package and implementation was written with applications to
+    stellar spectroscopic data in mind.
 
     Parameters
     ----------
     latent_size : int
         The size of the latent vector representation for each object (i.e. the embedded
         dimensionality).
+
+    Notes
+    -----
+    **Parameter Format**
+
+    The :meth:`optimize` method returns parameters in a nested format::
+
+        {
+            "output_name": {
+                "data": {"A": array, ...},  # Transform parameters
+                "err": {"s": array, ...}    # Error transform parameters
+            },
+            "latents": array  # Per-object latent vectors
+        }
+
+    This same format should be used when passing parameters to :meth:`predict_outputs`.
+
+    **Naming Restrictions**
+
+    Output names and transform parameter names cannot contain colons (``':'``) as they
+    are reserved for internal parameter naming in numpyro.
     """
 
     latent_size: int
@@ -133,11 +160,18 @@ class LuxModel(eqx.Module):
         name
             The name of the output. If you intend to use this model with numpyro and
             specified data, this name should correspond to the name of data passed in
-            via a `pollux.data.PolluxData` object.
+            via a `pollux.data.PolluxData` object. The name cannot contain colons (':')
+            as they are reserved for internal parameter naming.
         data_transform
             A specification of the transformation function that takes a latent vector
             representation in and predicts the output values.
         """
+        if ":" in name:
+            msg = (
+                f"Output name '{name}' contains ':' which is reserved for internal "
+                "parameter naming. Please use a different name."
+            )
+            raise ValueError(msg)
         if name in self.outputs:
             msg = f"Output with name {name} already exists"
             raise ValueError(msg)
@@ -187,6 +221,63 @@ class LuxModel(eqx.Module):
 
         return extracted_pars
 
+    def _validate_pars_format(
+        self, pars: dict[str, Any], context: str = "parameters"
+    ) -> bool:
+        """Validate that parameters are in the expected nested format.
+
+        The expected format is::
+
+            {
+                "output_name": {
+                    "data": {...} or [...],  # Transform parameters
+                    "err": {...}             # Error transform parameters (optional)
+                },
+                "latents": array            # Optional, not used by transforms
+            }
+
+        Parameters
+        ----------
+        pars
+            The parameters dictionary to validate.
+        context
+            A string describing the context (for error messages).
+
+        Returns
+        -------
+        bool
+            True if format is valid (nested), False if it appears to be direct format.
+
+        Raises
+        ------
+        TypeError
+            If the format is clearly invalid (not a dict where expected).
+        """
+        for output_name in self.outputs:
+            if output_name not in pars:
+                continue
+
+            output_pars = pars[output_name]
+
+            # Check if it's a dict
+            if not isinstance(output_pars, dict):
+                msg = (
+                    f"Expected dict for {context} '{output_name}', "
+                    f"got {type(output_pars).__name__}"
+                )
+                raise TypeError(msg)
+
+            # Check if it has "data" or "err" keys (nested format)
+            # vs direct parameter keys (deprecated format)
+            has_data_key = "data" in output_pars
+            has_err_key = "err" in output_pars
+
+            if not has_data_key and not has_err_key:
+                # This looks like direct format - return False to indicate
+                return False
+
+        return True
+
     def predict_outputs(
         self,
         latents: BatchedLatentsT,
@@ -198,24 +289,38 @@ class LuxModel(eqx.Module):
         Parameters
         ----------
         latents
-            The latent vectors that transform into the outputs.
+            The latent vectors that transform into the outputs. Shape should be
+            ``(n_objects, latent_size)``.
         pars
             A dictionary of parameters for each output transformation in the model.
-            Can be in either format:
-            1. Direct format: {"output_name": {...} or [...], ...}
-            2. Nested format: {"output_name": {"data": ..., "err": ...}, ...}
-            For TransformSequence outputs, expects either:
-            - A list of parameter dictionaries
-            - A flat dictionary with "{index}:{param}" keys
+            Should be in the nested format returned by :meth:`optimize`::
+
+                {
+                    "output_name": {
+                        "data": {...} or [...],  # Transform parameters
+                        "err": {...}             # Error transform parameters
+                    },
+                    "latents": array  # Optional, not used here
+                }
+
+            For single transforms, ``"data"`` is a dict: ``{"A": array, "b": array}``
+
+            For :class:`TransformSequence`, ``"data"`` is a tuple of dicts:
+            ``({"A": array}, {"b": array})``
+
+            .. deprecated::
+                Passing parameters in direct format (without the ``"data"``/``"err"``
+                wrapper) is deprecated and will be removed in a future version.
+
         names
-            A single string or a list of output names to predict. If None, predict all
-            outputs (default).
+            A single string or a list of output names to predict. If ``None``, predict
+            all outputs (default).
 
         Returns
         -------
         dict
             A dictionary of predicted output values, where the keys are the output
-            names.
+            names and values are arrays of shape ``(n_objects, output_size)``.
         """
 
         if latents.shape[-1] != self.latent_size:
@@ -229,6 +334,18 @@ class LuxModel(eqx.Module):
             names = list(self.outputs.keys())
         elif isinstance(names, str):
             names = [names]
+
+        # Check parameter format and warn if using deprecated direct format
+        is_nested_format = self._validate_pars_format(pars, context="predict_outputs")
+        if not is_nested_format:
+            warnings.warn(
+                "Passing parameters in direct format (e.g., {'flux': {'A': ...}}) is "
+                "deprecated. Please use the nested format returned by optimize(): "
+                "{'flux': {'data': {'A': ...}, 'err': {...}}}. "
+                "Direct format support will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         # Extract data parameters, handling both nested and direct formats
         data_pars = self._extract_transform_pars(pars, transform_type="data")
@@ -305,7 +422,9 @@ class LuxModel(eqx.Module):
                     f"{output_name}:err:{param_name}", prior
                 )
 
-        outputs = self.predict_outputs(latents, data_pars, names=output_names)
+        # Wrap data_pars in nested format for predict_outputs
+        nested_pars = {k: {"data": v} for k, v in data_pars.items()}
+        outputs = self.predict_outputs(latents, nested_pars, names=output_names)
         for output_name in output_names:
             pred = outputs[output_name]
 
@@ -419,7 +538,9 @@ class LuxModel(eqx.Module):
 
         partial_pars: dict[str, Any] = {}
         if fixed_pars is not None:
-            packed_fixed_pars = self.pack_numpyro_pars(fixed_pars)
+            # Use ignore_missing=True since fixed_pars typically contains only a subset
+            # of parameters (the ones we want to fix during optimization)
+            packed_fixed_pars = self.pack_numpyro_pars(fixed_pars, ignore_missing=True)
             partial_pars["fixed_pars"] = packed_fixed_pars
 
         if names is not None:
@@ -451,6 +572,103 @@ class LuxModel(eqx.Module):
         )
         # TODO: should the pars get their own object?
         return unpacked_pars, svi_results
+
+    def optimize_iterative(
+        self,
+        data: PolluxData,
+        blocks: list["ParameterBlock"] | None = None,
+        max_cycles: int = 10,
+        tol: float = 1e-4,
+        rng_key: jax.Array | None = None,
+        initial_params: UnpackedParamsT | None = None,
+        latents_prior: dist.Distribution | None = None,
+        progress: bool = True,
+        record_history: bool = False,
+    ) -> "IterativeOptimizationResult":
+        """Optimize using iterative parameter block coordinate descent.
+
+        For models with purely linear outputs, this method exploits the linear structure
+        for faster convergence. For linear transforms, each sub-problem is solved
+        exactly using weighted least squares.
+
+        The default strategy alternates between:
+        1. Optimize latents (with output parameters fixed)
+        2. Optimize each output's parameters (with latents fixed)
+
+        Parameters
+        ----------
+        data
+            The training data.
+        blocks
+            List of :class:`~pollux.models.ParameterBlock` specifications.
+            If None, uses a default strategy that alternates between latents
+            and each output.
+        max_cycles
+            Maximum number of full optimization cycles.
+        tol
+            Convergence tolerance. Stops when relative change in loss < tol.
+        rng_key
+            Random key for initialization. If None, uses a default key.
+        initial_params
+            Initial parameter values. If None, initialized from priors.
+        latents_prior
+            Prior distribution for latents. If None, uses Normal(0, 1).
+            Used to determine regularization strength for latent least squares.
+        progress
+            Whether to display a tqdm progress bar showing optimization progress.
+        record_history
+            Whether to record detailed per-block loss history.
+
+        Returns
+        -------
+        IterativeOptimizationResult
+            The optimization result containing:
+            - ``params``: Optimized parameters in unpacked format
+            - ``losses_per_cycle``: Loss values at the end of each cycle
+            - ``n_cycles``: Number of cycles completed
+            - ``converged``: Whether optimization converged
+            - ``history``: Optional detailed history (if record_history=True)
+
+        Notes
+        -----
+        This method only supports models with linear transforms
+        (:class:`~pollux.models.LinearTransform`,
+        :class:`~pollux.models.AffineTransform`, or
+        :class:`~pollux.models.OffsetTransform`). For models with non-linear
+        transforms, use :meth:`optimize` instead.
+
+        Regularization is automatically extracted from the priors on the
+        transform parameters.
+
+        Examples
+        --------
+        Basic usage:
+
+        >>> result = model.optimize_iterative(data, max_cycles=20)  # doctest: +SKIP
+        >>> opt_params = result.params  # doctest: +SKIP
+
+        With custom blocks:
+
+        >>> from pollux.models import ParameterBlock  # doctest: +SKIP
+        >>> blocks = [  # doctest: +SKIP
+        ...     ParameterBlock("latents", "latents", optimizer="least_squares"),
+        ...     ParameterBlock("flux", "flux:data", optimizer="least_squares"),
+        ... ]
+        >>> result = model.optimize_iterative(data, blocks=blocks)  # doctest: +SKIP
+
+        """
+        return optimize_iterative(
+            model=self,
+            data=data,
+            blocks=blocks,
+            max_cycles=max_cycles,
+            tol=tol,
+            rng_key=rng_key,
+            initial_params=initial_params,
+            latents_prior=latents_prior,
+            progress=progress,
+            record_history=record_history,
+        )
 
     def unpack_numpyro_pars(
         self, pars: PackedParamsT, ignore_missing: bool = False
@@ -519,7 +737,7 @@ class LuxModel(eqx.Module):
 
     def pack_numpyro_pars(
         self,
-        pars: dict[str, Any],  # TODO: update Any to real types
+        pars: UnpackedParamsT,
         ignore_missing: bool = False,
     ) -> PackedParamsT:
         """Pack parameters into a flat dictionary keyed on numpyro names.
@@ -559,7 +777,7 @@ class LuxModel(eqx.Module):
                 msg = f"Missing parameters for output {output_name}"
                 raise ValueError(msg)
 
-            output_pars = pars.get(output_name, {})
+            output_pars = dict(pars.get(output_name, {}))
             tmp = output.pack_pars(
                 {
                     "data": output_pars.get("data", {}),
@@ -574,6 +792,24 @@ class LuxModel(eqx.Module):
         # Handle non-output parameters (like latents)
         for name in pars:
             if name not in self.outputs:
-                packed[name] = pars[name]
+                packed[name] = jnp.array(pars[name])
 
         return packed
+
+
+class LuxModel(Lux):
+    """Deprecated alias for Lux class.
+
+    .. deprecated::
+        Use :class:`Lux` instead. ``LuxModel`` will be removed in a future version.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize LuxModel with deprecation warning."""
+        warnings.warn(
+            "The `LuxModel` class is deprecated and will be removed in a future "
+            "version. Please use the `Lux` class instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)

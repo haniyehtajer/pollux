@@ -48,18 +48,21 @@ def test_infer_distance():
     trans = plx.models.TransformSequence(
         transforms=(
             plx.models.LinearTransform(
-                output_size=n_labels, param_priors={"A": dist.Normal()}
+                output_size=n_labels, priors={"A": dist.Normal()}
             ),
             plx.models.OffsetTransform(
                 output_size=n_stars,
                 vmap=False,
-                param_priors={"b": dist.Normal(11.0, 3.0)},
+                priors={"b": dist.Normal(11.0, 3.0)},
             ),
         )
     )
     model.register_output("label", trans)
 
-    pars = {"flux": {"A": truth["B"]}, "label": [{"A": truth["A"]}, {"b": true_dm}]}
+    pars = {
+        "flux": {"data": {"A": truth["B"]}},
+        "label": {"data": [{"A": truth["A"]}, {"b": true_dm}]},
+    }
     test_out = model.predict_outputs(truth["latents"], pars)
     assert jnp.allclose(test_out["flux"], truth["flux"], atol=1e-5)
     assert jnp.allclose(test_out["label"], truth["label"] + true_dm, atol=1e-5)

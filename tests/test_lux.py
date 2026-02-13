@@ -11,13 +11,13 @@ from pollux.models.transforms import (
 )
 
 
-@pytest.fixture()
+@pytest.fixture
 def rng():
     """Random number generator for consistent test results."""
     return np.random.default_rng(42)
 
 
-@pytest.fixture()
+@pytest.fixture
 def model_config():
     """Basic model configuration used across tests."""
     return {
@@ -28,7 +28,7 @@ def model_config():
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 def single_transform_model(model_config):
     """LuxModel with a single LinearTransform for testing basic functionality."""
     model = plx.LuxModel(latent_size=model_config["n_latents"])
@@ -36,7 +36,7 @@ def single_transform_model(model_config):
     return model
 
 
-@pytest.fixture()
+@pytest.fixture
 def single_transform_with_err_model(model_config):
     """LuxModel with LinearTransform and OffsetTransform error transform."""
     model = plx.LuxModel(latent_size=model_config["n_latents"])
@@ -48,7 +48,7 @@ def single_transform_with_err_model(model_config):
     return model
 
 
-@pytest.fixture()
+@pytest.fixture
 def transform_sequence_model(model_config):
     """LuxModel with a TransformSequence (LinearTransform + OffsetTransform)."""
     model = plx.LuxModel(latent_size=model_config["n_latents"])
@@ -62,7 +62,7 @@ def transform_sequence_model(model_config):
     return model
 
 
-@pytest.fixture()
+@pytest.fixture
 def transform_sequence_with_err_model(model_config):
     """LuxModel with TransformSequence and a FunctionTransform error transform."""
     model = plx.LuxModel(latent_size=model_config["n_latents"])
@@ -82,8 +82,8 @@ def transform_sequence_with_err_model(model_config):
     err_trans = FunctionTransform(
         output_size=model_config["n_flux"],
         transform=scale_func,
-        param_priors={"scale": dist.Normal(1.0, 0.1)},
-        param_shapes={"scale": (1,)},
+        priors={"scale": dist.Normal(1.0, 0.1)},
+        shapes={"scale": (1,)},
         vmap=False,
     )
 
@@ -91,7 +91,7 @@ def transform_sequence_with_err_model(model_config):
     return model
 
 
-@pytest.fixture()
+@pytest.fixture
 def multi_output_model(model_config):
     """LuxModel with multiple outputs: TransformSequence flux + single transform labels."""
     model = plx.LuxModel(latent_size=model_config["n_latents"])
@@ -413,3 +413,43 @@ class TestLuxModelParameterPackUnpack:
         )
         # With ignore_missing and no parameters, we get an empty dict (no outputs created)
         assert unpacked_skipped == {}
+
+
+class TestLuxModelValidation:
+    """Tests for input validation and deprecation warnings."""
+
+    def test_output_name_with_colon_raises(self):
+        """Output names containing colons should raise ValueError."""
+        model = plx.LuxModel(latent_size=4)
+        with pytest.raises(ValueError, match="contains ':'"):
+            model.register_output("flux:invalid", LinearTransform(output_size=8))
+
+    def test_direct_format_deprecation_warning(self, rng, model_config):
+        """Using direct parameter format should raise DeprecationWarning."""
+        model = plx.LuxModel(latent_size=model_config["n_latents"])
+        model.register_output(
+            "flux", LinearTransform(output_size=model_config["n_flux"])
+        )
+
+        latents = rng.random((model_config["n_stars"], model_config["n_latents"]))
+        A = rng.random((model_config["n_flux"], model_config["n_latents"]))
+
+        # Direct format (deprecated) - should warn
+        direct_pars = {"flux": {"A": A}}
+        with pytest.warns(DeprecationWarning, match="direct format"):
+            model.predict_outputs(latents, direct_pars)
+
+    def test_nested_format_no_warning(self, rng, model_config):
+        """Using nested parameter format should not raise any warnings."""
+        model = plx.LuxModel(latent_size=model_config["n_latents"])
+        model.register_output(
+            "flux", LinearTransform(output_size=model_config["n_flux"])
+        )
+
+        latents = rng.random((model_config["n_stars"], model_config["n_latents"]))
+        A = rng.random((model_config["n_flux"], model_config["n_latents"]))
+
+        # Nested format (correct) - should not warn
+        nested_pars = {"flux": {"data": {"A": A}}}
+        # If this raises a warning, pytest will fail due to filterwarnings=error
+        model.predict_outputs(latents, nested_pars)

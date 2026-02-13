@@ -48,8 +48,8 @@ class OutputData(eqx.Module):
     >>> spectra = jrnd.uniform(rngs[0], minval=0, maxval=10, shape=(128, 2048))
     >>> spectra_err = jrnd.uniform(rngs[1], minval=0.1, maxval=1, shape=spectra.shape)
     >>> flux_data = OutputData(data=spectra, err=spectra_err)
-    >>> flux_data
-    OutputData(data=f32[128,2048], err=f32[128,2048])
+    >>> flux_data  # doctest: +ELLIPSIS
+    OutputData(data=f...[128,2048], err=f...[128,2048])
     >>> assert flux_data.processed is False
 
     We did not specify a preprocessor, so the data are not preprocessed even if we call
@@ -216,17 +216,31 @@ class PolluxData(ImmutableMap[str, OutputData]):  # type: ignore[misc]
         )
 
     def unprocess(
-        self, data: Union["PolluxData", dict[str, BatchedDataT], None] = None
+        self,
+        data: Union["PolluxData", dict[str, BatchedDataT], None] = None,
+        ignore_missing: bool = False,
     ) -> "PolluxData":
-        """Unprocess all output data."""
+        """Unprocess all output data.
+
+        Parameters
+        ----------
+        data
+            Data to unprocess. If None, unprocess self.
+        ignore_missing
+            If True, only unprocess keys that are present in both the instance
+            and the input data. If False (default), raise an error if keys don't match.
+        """
         data = data or self
 
-        if set(self.keys()) != set(data.keys()):
+        if not ignore_missing and set(self.keys()) != set(data.keys()):
             msg = "Data to unprocess must have the same keys as the instance"
             raise ValueError(msg)
 
+        # Only unprocess keys present in both
+        keys_to_unprocess = set(self.keys()) & set(data.keys())
+
         return self.__class__(
-            **{name: self[name].unprocess(output) for name, output in data.items()}
+            **{name: self[name].unprocess(data[name]) for name in keys_to_unprocess}
         )
 
     def __len__(self) -> int:

@@ -28,17 +28,18 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
+  "dataclassish>=0.8.0",
   "equinox >=0.11.12",
-  "jax",
-  "jaxopt",
-  "numpyro",
-  "numpyro-ext",
-  "typing-extensions",
-  "xmmutablemap",
-  "dataclassish"
+  "jax>=0.7.2",
+  "jaxopt>=0.8.5",
+  "numpyro>=0.19.0",
+  "numpyro-ext>=0.0.4",
+  "tqdm>=4.67.1",
+  "typing-extensions>=4.15.0",
+  "xmmutablemap>=0.2.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 test = [
   "pytest >=6",
   "pytest-cov >=3",
@@ -63,10 +64,14 @@ docs = [
   "sphinxext-rediraffe>=0.2.7",
 ]
 dev = [
+  {include-group = "test"},
+  {include-group = "docs"},
+  "hatch",
   "ipykernel",
-  "nox",
+  "ipywidgets",
   "pre-commit",
-  "pollux[test,docs]"
+  "twine",
+  "ruff",
 ]
 
 [project.urls]
@@ -101,6 +106,7 @@ filterwarnings = [
   "error",
   "ignore:jax\\.core\\.call_p is deprecated:DeprecationWarning",
   "ignore:jax\\.core\\.closed_call_p is deprecated:DeprecationWarning",
+  "ignore:The `LuxModel` class is deprecated:DeprecationWarning",
 ]
 log_cli_level = "INFO"
 testpaths = ["src", "docs", "tests"]
@@ -168,15 +174,18 @@ ignore = [
   "PLR09",    # Too many <...>
   "PLR2004",  # Magic value used in comparison
   "ISC001",   # Conflicts with formatter
-  "B905"      # zip() without explicit strict
+  "B905",      # zip() without explicit strict
+
 ]
 # isort.required-imports = []
 # Uncomment if using a _compat.typing backport
 # typing-modules = ["pollux._compat.typing"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["T20"]
+"tests/**" = ["T20", "F841"]
 "noxfile.py" = ["T20"]
+"**/__init__.py" = ["F401", "F403"]
+"docs/**" = ["T201"]
 
 
 [tool.pylint]
