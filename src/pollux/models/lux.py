@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import SVI, Trace_ELBO
-from numpyro.infer.autoguide import AutoDelta
+from numpyro.infer.autoguide import AutoDelta, AutoGuide
 
 from ..data import PolluxData
 from ..typing import (
@@ -525,11 +525,39 @@ class Lux(eqx.Module):
         fixed_pars: UnpackedParamsT | None = None,
         names: list[str] | None = None,
         svi_run_kwargs: dict[str, Any] | None = None,
+        guide: type[AutoGuide] | AutoGuide | None = None,
     ) -> tuple[UnpackedParamsT, Any]:
-        """Optimize the model parameters.
+        """Optimize the model parameters using SVI.
 
         Parameters
         ----------
+        data
+            The observed data to optimize against.
+        num_steps
+            Number of SVI optimization steps.
+        rng_key
+            JAX random key for the optimization.
+        optimizer
+            Numpyro optimizer to use. Defaults to ``numpyro.optim.Adam()``.
+        latents_prior
+            Prior distribution for the latent vectors. If ``None``, uses a unit
+            Gaussian. If ``False``, uses an improper uniform prior.
+        custom_model
+            Optional callable for custom modeling components.
+        fixed_pars
+            Parameters to hold fixed during optimization.
+        names
+            Output names to include. If ``None``, includes all outputs.
+        svi_run_kwargs
+            Additional keyword arguments passed to ``SVI.run()``.
+        guide
+            The autoguide to use for variational inference. Can be:
+
+            - ``None`` (default): uses ``AutoDelta`` for MAP estimation.
+            - A guide class (e.g. ``AutoNormal``): will be instantiated with the
+              model function.
+            - A guide instance: used directly (must already be constructed with
+              the model function).
 
         """
 
@@ -561,10 +589,22 @@ class Lux(eqx.Module):
 
         svi_run_kwargs = svi_run_kwargs or {}
 
-        guide = AutoDelta(model)
-        svi = SVI(model, guide, optimizer, Trace_ELBO())
+        if guide is None:
+            _guide = AutoDelta(model)
+        elif isinstance(guide, type) and issubclass(guide, AutoGuide):
+            _guide = guide(model)
+        elif isinstance(guide, AutoGuide):
+            _guide = guide
+        else:
+            msg = (
+                "guide must be None, an AutoGuide subclass, or an AutoGuide instance, "
+                f"got {type(guide)}"
+            )
+            raise TypeError(msg)
+
+        svi = SVI(model, _guide, optimizer, Trace_ELBO())
         svi_results = svi.run(svi_key, num_steps, data, **svi_run_kwargs)
-        packed_MAP_pars = guide.sample_posterior(sample_key, svi_results.params)
+        packed_MAP_pars = _guide.sample_posterior(sample_key, svi_results.params)
 
         unpacked_pars = self.unpack_numpyro_pars(
             packed_MAP_pars,
@@ -576,7 +616,8 @@ class Lux(eqx.Module):
     def optimize_iterative(
         self,
         data: PolluxData,
-        blocks: list["ParameterBlock"] | None = None,
+        blocks: "list[ParameterBlock] | list[str] | None" = None,
+        fixed_pars: UnpackedParamsT | None = None,
         max_cycles: int = 10,
         tol: float = 1e-4,
         rng_key: jax.Array | None = None,
@@ -600,17 +641,29 @@ class Lux(eqx.Module):
         data
             The training data.
         blocks
-            List of :class:`~pollux.models.ParameterBlock` specifications.
+            List of :class:`~pollux.models.ParameterBlock` specifications, or a
+            list of strings naming which parameter groups to optimize (e.g.
+            ``["latents"]``). When strings are provided, :class:`ParameterBlock`
+            instances are constructed automatically with an inferred optimizer.
             If None, uses a default strategy that alternates between latents
             and each output.
+        fixed_pars
+            Parameters to hold fixed during optimization. When provided alongside
+            string ``blocks``, the function initializes the optimized parameters
+            (e.g. latents to zero) and merges ``fixed_pars`` with them before
+            returning, so ``result.params`` is a complete parameter dict.
         max_cycles
             Maximum number of full optimization cycles.
         tol
             Convergence tolerance. Stops when relative change in loss < tol.
         rng_key
-            Random key for initialization. If None, uses a default key.
+            JAX random key. Required when any block uses SVI (i.e.,
+            ``optimizer != "least_squares"``). If None and ``initial_params``
+            is also None, falls back to ``jax.random.PRNGKey(0)`` for
+            initialization from priors.
         initial_params
-            Initial parameter values. If None, initialized from priors.
+            Initial parameter values. If None and ``fixed_pars`` is provided,
+            built automatically. If both are None, initialized from priors.
         latents_prior
             Prior distribution for latents. If None, uses Normal(0, 1).
             Used to determine regularization strength for latent least squares.
@@ -623,7 +676,8 @@ class Lux(eqx.Module):
         -------
         IterativeOptimizationResult
             The optimization result containing:
-            - ``params``: Optimized parameters in unpacked format
+            - ``params``: Optimized parameters in unpacked format (includes fixed
+              params when ``fixed_pars`` is provided)
             - ``losses_per_cycle``: Loss values at the end of each cycle
             - ``n_cycles``: Number of cycles completed
             - ``converged``: Whether optimization converged
@@ -631,11 +685,13 @@ class Lux(eqx.Module):
 
         Notes
         -----
-        This method only supports models with linear transforms
-        (:class:`~pollux.models.LinearTransform`,
-        :class:`~pollux.models.AffineTransform`, or
-        :class:`~pollux.models.OffsetTransform`). For models with non-linear
-        transforms, use :meth:`optimize` instead.
+        For blocks with linear transforms (:class:`~pollux.models.LinearTransform`,
+        :class:`~pollux.models.AffineTransform`,
+        :class:`~pollux.models.OffsetTransform`), each sub-problem is solved
+        exactly via weighted least squares. For non-linear transforms, SVI is
+        used with ``numpyro.optim.Adam`` at ``step_size=1e-3`` by default;
+        override via ``optimizer_kwargs`` on the block, e.g.
+        ``ParameterBlock(..., optimizer_kwargs={"step_size": 1e-4})``.
 
         Regularization is automatically extracted from the priors on the
         transform parameters.
@@ -656,11 +712,20 @@ class Lux(eqx.Module):
         ... ]
         >>> result = model.optimize_iterative(data, blocks=blocks)  # doctest: +SKIP
 
+        Optimizing only latents with fixed output parameters (e.g. applying a
+        trained model to test data):
+
+        >>> result = model.optimize_iterative(  # doctest: +SKIP
+        ...     test_data, blocks=["latents"], fixed_pars=trained_pars
+        ... )
+        >>> test_opt_pars = result.params  # contains fixed + optimized params  # doctest: +SKIP
+
         """
         return optimize_iterative(
             model=self,
             data=data,
             blocks=blocks,
+            fixed_pars=fixed_pars,
             max_cycles=max_cycles,
             tol=tol,
             rng_key=rng_key,

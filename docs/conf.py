@@ -5,12 +5,29 @@ list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 """
 
+import os
+import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pytz
 
 from pollux import __version__
+
+# -- Tutorial data -----------------------------------------------------------
+
+_DATA_DIR = Path(__file__).parent / "_data"
+_TUTORIAL_DATA = {
+    "rgb-highSNR-1k-1chip.h5": "https://users.flatironinstitute.org/~apricewhelan/pollux/rgb-highSNR-1k-1chip.h5",
+}
+
+_DATA_DIR.mkdir(exist_ok=True)
+for _filename, _url in _TUTORIAL_DATA.items():
+    _path = _DATA_DIR / _filename
+    if not _path.exists():
+        print(f"Downloading tutorial data: {_filename}")
+        urllib.request.urlretrieve(_url, _path)
 
 # -- Project information -----------------------------------------------------
 
@@ -39,12 +56,14 @@ extensions = [
     "sphinxext.opengraph",
     "sphinx_togglebutton",
     # "sphinx_tippy",
+    "rtds_action",
 ]
 
 python_use_unqualified_type_names = True
 
 exclude_patterns = [
     "_build",
+    "_data",
     "**.ipynb_checkpoints",
     "Thumbs.db",
     ".DS_Store",
@@ -106,7 +125,7 @@ myst_heading_anchors = 3
 #     "Any": ":obj:`typing.Any`",
 # }
 
-execution_timeout = 600
+nb_execution_mode = "off"
 
 
 # -- HTML output -------------------------------------------------
@@ -148,3 +167,75 @@ html_theme_options: dict[str, Any] = {
         # },
     ],
 }
+
+# -- rtds-action --
+
+if "GITHUB_TOKEN" in os.environ:
+    print("GitHub Token found: retrieving artifact")
+
+    # The name of your GitHub repository
+    rtds_action_github_repo = "adrn/pollux"
+
+    # The path where the artifact should be extracted
+    # Note: this is relative to the CWD when sphinx runs (the repo root on RTD)
+    rtds_action_path = "docs/tutorials"
+
+    # The "prefix" used in the `upload-artifact` step of the action
+    rtds_action_artifact_prefix = "notebooks-for-"
+
+    # A GitHub personal access token is required, more info below
+    rtds_action_github_token = os.environ["GITHUB_TOKEN"]
+
+    # Whether or not to raise an error on ReadTheDocs if the
+    # artifact containing the notebooks can't be downloaded (optional)
+    rtds_action_error_if_missing = True
+
+else:
+    print("No GitHub Token found: skipping artifact retrieval")
+    rtds_action_github_repo = ""
+    rtds_action_github_token = ""
+    rtds_action_path = ""
+
+
+# -- Check for executed tutorials and only add to toctree if they exist ------
+
+# Note: list the expected .ipynb filename for each tutorial
+tutorial_files = [
+    "tutorials/Lux-linear-simulated-data.ipynb",
+    "tutorials/Lux-getting-started-apogee.ipynb",
+    "tutorials/Lux-iterative-optimization.ipynb",
+    "tutorials/Lux-simulated-data-underestimated-err.ipynb",
+]
+
+_not_executed = []
+_tutorial_toctree_items = []
+for fn in tutorial_files:
+    if not Path(fn).exists() and "GITHUB_TOKEN" not in os.environ:
+        _not_executed.append(fn)
+        continue
+    _tutorial_toctree_items.append(fn)
+
+if _tutorial_toctree_items:
+    _items = "\n   ".join(_tutorial_toctree_items)
+    _tutorial_toctree = f"""\
+.. toctree::
+   :maxdepth: 1
+   :caption: Tutorials
+
+   {_items}
+"""
+else:
+    _tutorial_toctree = "No tutorials found!\n"
+
+if _not_executed:
+    print(
+        "\n-------- Pollux warning --------\n"
+        "Some tutorial notebooks could not be found! This is likely because "
+        "the tutorial notebooks have not been executed. If you are building "
+        "the documentation locally, you may want to execute the notebooks "
+        "before running the sphinx build.\n"
+        f"Missing tutorials: {', '.join(_not_executed)}\n"
+    )
+
+with Path("_tutorials.rst").open("w", encoding="utf-8") as f:
+    f.write(_tutorial_toctree)
