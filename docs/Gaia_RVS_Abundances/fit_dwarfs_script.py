@@ -40,13 +40,13 @@ params = {
 rcParams.update(params)
 
 
-df_stars = pd.read_pickle('data/training_set_giants.pkl')
-df_gaia_rvs = pd.read_pickle('data/test_set_KDTree_giants_rvs_fluxes.pkl')
+df_stars = pd.read_pickle('data/training_set_dwarfs.pkl')
+df_gaia_rvs = pd.read_pickle('data/test_set_KDTree_dwarfs_rvs_fluxes.pkl')
 
 n_all_stars = len(df_stars)
 #n_stars = 500  # number of simulated stars to generate in the train and test sets
 n_stars = n_all_stars
-labels = ['teff', 'logg', 'fe_h', 'mg_h', 'n_h', 'si_h', 'ni_h', 'ca_h', 'ce_h', 'm_h_atm', 'alpha_m_atm']
+labels = ['teff', 'logg', 'fe_h', 'mg_h', 'n_h', 'si_h', 'ni_h', 'ca_h', 'm_h_atm', 'alpha_m_atm']
 n_labels = len(labels)  # number of labels to generate per star
 #n_latents = n_labels * 4  # size of the latent vector per star
 n_latents = 21
@@ -241,7 +241,7 @@ for i in range(predict_test_values_flux["label"].shape[1]):
 for j in range(len(labels), len(axes)):
     axes[j].axis("off")
 
-_ = fig.suptitle(f"Flux only: predicted vs. true labels, giants, no mask, n_latents = {n_latents}", fontsize=22)
+_ = fig.suptitle(f"Flux only: predicted vs. true labels, dwarfs, no mask, n_latents = {n_latents}", fontsize=22)
 plt.savefig("test_labels_standardized.pdf", dpi=300, bbox_inches="tight")
 plt.close(fig)
 
@@ -263,7 +263,7 @@ for i in range(predict_test_values_flux["label"].shape[1]):
 for j in range(len(labels), len(axes)):
     axes[j].axis("off")
     
-_ = fig.suptitle(f"Flux only: predicted vs. true labels, giants, no mask, n_latents = {n_latents}", fontsize=22)
+_ = fig.suptitle(f"Flux only: predicted vs. true labels, dwarfs, no mask, n_latents = {n_latents}", fontsize=22)
 plt.savefig("test_labels_unprocessed.pdf", dpi=300, bbox_inches="tight")
 plt.close(fig)
 
@@ -300,7 +300,7 @@ per_star_df = pd.DataFrame(df_dict)
 
 # save test results
 
-per_star_df.to_csv("data/test_results_giants.csv", index=False)
+per_star_df.to_csv("data/test_results_dwarfs.csv", index=False)
 
 plt.figure(figsize=(18, 10))
 
@@ -320,7 +320,7 @@ for i in range(len(labels)):
 for j in range(len(labels), len(axes)):
     axes[j].axis("off")
 
-plt.suptitle(f"giants, n_latents = {n_latents}")
+plt.suptitle(f"dwarfs, n_latents = {n_latents}")
 plt.savefig("test_residuals.pdf", dpi=300, bbox_inches="tight")
 plt.close(fig)
 
@@ -352,7 +352,7 @@ df_output = pd.DataFrame(data_to_save, columns=labels)
 
 df_output['source_id'] = df_gaia_rvs['source_id']
 
-df_output.to_csv("data/giants_predicted_no_mask.csv", index=False)
+df_output.to_csv("data/dwarfs_predicted_no_mask.csv", index=False)
 
 df_output['fe_mg'] = df_output['fe_h'] - df_output['mg_h']
  
