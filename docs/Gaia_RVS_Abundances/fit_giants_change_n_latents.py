@@ -80,8 +80,8 @@ B[:, 1] = B[:, 1] + 2 * np.exp(-0.5 * (np.arange(n_flux) - n_flux / 4) ** 2 / 3*
 
 df_stars = df_stars[:n_stars]
 #df_gaia_rvs = df_gaia_rvs[:500]
-print("len test set stars = ", len(df_stars))
-print("len all stars = ", len(df_gaia_rvs))
+print("len training set stars = ", len(df_stars))
+print("len all stars (target) = ", len(df_gaia_rvs))
 
 # List of error column names corresponding to labels
 params_errors = [f"e_{p}" if not p.startswith('e_') else p for p in labels]
@@ -333,47 +333,3 @@ plt.suptitle(f"giants, n_latents = {n_latents}")
 plt.savefig(f"{output_dir}/test_residuals.pdf", dpi=300, bbox_inches="tight")
 plt.close(fig)
 
-# FIX: Use preprocessed_all_flux_data, not all_flux_data
-flux_only_data = plx.data.PolluxData(flux=preprocessed_all_flux_data["flux"])
-
-opt_pars_all_data, _ = model.optimize(
-    flux_only_data,
-    rng_key=jax.random.PRNGKey(12345),
-    optimizer=numpyro.optim.Adam(1e-3),
-    num_steps=10_000,
-    fixed_pars=fixed_pars,
-    names=["flux"],
-    svi_run_kwargs={"progress_bar": False},
-)
-
-predict_all_values_flux = model.predict_outputs(
-    opt_pars_all_data["latents"], opt_pars
-)
-
-predict_all_unprocessed_flux = all_data.unprocess(predict_all_values_flux)
-
-pred_data = predict_all_unprocessed_flux["label"].data[:]
-
-data_to_save = pred_data[:, :len(labels)]
-
-df_output = pd.DataFrame(data_to_save, columns=labels)
-
-df_output['source_id'] = df_gaia_rvs['source_id']
-
-df_output.to_csv(f"{output_dir}/giants_predicted_no_mask.csv", index=False)
-
-df_output['fe_mg'] = df_output['fe_h'] - df_output['mg_h']
- 
-plt.figure()
-plt.scatter(df_output['mg_h'], df_output['fe_mg'], s=5)
-
-# If you don't have labeled artists, plt.legend() will throw a warning, 
-# so you may want to remove it or add a label to the scatter plot.
-plt.legend() 
-
-plt.ylim(-0.8, 0.5)
-plt.xlim(-0.8, 0.6)
-plt.xlabel('[Mg/H]')
-plt.ylabel('[Fe/Mg]')
-plt.savefig(f"{output_dir}/fe_mg_scatter.pdf", dpi=300, bbox_inches="tight")
-plt.close()
